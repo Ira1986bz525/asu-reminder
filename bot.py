@@ -53,7 +53,7 @@ def fetch_schedule_html():
     data.update({
         "_csrf-frontend": csrf(page.text),
         "TimeTableForm[dateStart]": today.strftime("%d.%m.%Y"),
-        "TimeTableForm[dateEnd]": (today + timedelta(days=1)).strftime("%d.%m.%Y"),
+        "TimeTableForm[dateEnd]": (today + timedelta(days=7)).strftime("%d.%m.%Y"),  # тиждень наперед для /nextpara
         "TimeTableForm[indicationDays]": "5",
         "time-table-type": "1",
     })
@@ -91,17 +91,43 @@ def send(text):
                         "disable_web_page_preview": "true"}, timeout=20)
 
 
+def tg(method, **params):
+    return requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/{method}", data=params, timeout=60).json()
+
+
+def next_lesson_text(lessons, now):
+    upcoming = sorted((l for l in lessons if l[0] > now), key=lambda l: l[0])
+    if not upcoming:
+        return "Найближчим тижнем пар немає 🎉"
+    start, info, r1, r2 = upcoming[0]
+    ads = (fetch_ads(r1, r2) if r1 else "") or "посилання немає"
+    return f"📚 Наступна пара {start:%d.%m}:\n<b>{html.escape(info)}</b>\n\n{html.escape(ads)}"
+
+
+def handle_commands(offset, lessons):
+    """Чекає повідомлення до 50 с (замість sleep), відповідає на /nextpara у групі. Повертає новий offset."""
+    for u in tg("getUpdates", offset=offset, timeout=50).get("result", []):
+        offset = u["update_id"] + 1
+        msg = u.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) == TG_CHAT and msg.get("text", "").startswith("/nextpara"):
+            send(next_lesson_text(lessons, datetime.now(TZ)))
+    return offset
+
+
 def main():
     login()
     sent, lessons, loaded_at = set(), [], None
-    # MAX_HOURS: для GitHub Actions (ліміт джобу 6 год) — бот сам виходить після N годин або коли пар сьогодні більше нема
+    # MAX_HOURS: для GitHub Actions (ліміт джобу 6 год) — бот сам виходить після N годин
     max_hours = float(os.environ.get("MAX_HOURS", "0"))
     deadline = datetime.now(TZ) + timedelta(hours=max_hours)
+    tg("setMyCommands", commands='[{"command":"nextpara","description":"Яка наступна пара"}]')
+    # пропускаємо старі команди, що прийшли, поки бот спав
+    old = tg("getUpdates", offset=-1).get("result", [])
+    offset = old[-1]["update_id"] + 1 if old else None
     while True:
         try:
             now = datetime.now(TZ)
-            if max_hours and (now >= deadline or (loaded_at and not any(
-                    st > now and st.date() == now.date() for st, *_ in lessons))):
+            if max_hours and now >= deadline:
                 print("done for now")
                 return
             # shortcut: розклад перечитуємо раз на 30 хв, змінений в останні хвилини розклад може не підтягнутися
@@ -114,10 +140,11 @@ def main():
                     send(f"⏰ Через {int((start - now).total_seconds() // 60) + 1} хв пара:\n"
                          f"<b>{html.escape(info)}</b>\n\n{html.escape(ads)}")
                     sent.add(key)
+            offset = handle_commands(offset, lessons)
         except Exception as e:
             print("error:", e)
             loaded_at = None
-        time.sleep(60)
+            time.sleep(30)
 
 
 if __name__ == "__main__":
