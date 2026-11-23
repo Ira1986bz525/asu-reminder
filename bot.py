@@ -1,10 +1,11 @@
 """Telegram-бот: за 5 хвилин до пари кидає в групу назву пари і посилання з «Оголошення» АСУ."""
-import os, re, time, html
+import os, re, time, html, json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from cryptography.fernet import Fernet
 
 ASU = "https://asu.btsau.edu.ua"
 TZ = ZoneInfo("Europe/Kyiv")
@@ -109,9 +110,45 @@ def handle_commands(offset, lessons):
     for u in tg("getUpdates", offset=offset, timeout=50).get("result", []):
         offset = u["update_id"] + 1
         msg = u.get("message") or {}
-        if str(msg.get("chat", {}).get("id")) == TG_CHAT and msg.get("text", "").startswith("/nextpara"):
+        if str(msg.get("chat", {}).get("id")) != TG_CHAT:
+            continue
+        # Telegram не дає боту список учасників: збираємо тих, хто пише в чат, і тих, хто зайшов
+        for usr in [msg.get("from") or {}] + msg.get("new_chat_members", []):
+            if usr.get("id") and not usr.get("is_bot"):
+                add_member(usr["id"], usr.get("first_name", "студент"))
+        text = msg.get("text", "")
+        if text.startswith("/nextpara"):
             send(next_lesson_text(lessons, datetime.now(TZ)))
+        elif text.startswith("/reg"):
+            send("✅ Записав, тепер я буду тегати тебе перед парами")
     return offset
+
+
+# Репо публічний: список учасників зберігаємо зашифрованим ключем із секрету MEMBERS_KEY
+MEMBERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "members.enc")
+FERNET = Fernet(os.environ["MEMBERS_KEY"]) if os.environ.get("MEMBERS_KEY") else None
+
+
+def load_members():
+    if not FERNET:
+        return {}
+    try:
+        with open(MEMBERS_FILE, "rb") as f:
+            return json.loads(FERNET.decrypt(f.read()))
+    except FileNotFoundError:
+        return {}
+
+
+def add_member(uid, name):
+    m = load_members()
+    if FERNET and m.get(str(uid)) != name:
+        m[str(uid)] = name
+        with open(MEMBERS_FILE, "wb") as f:
+            f.write(FERNET.encrypt(json.dumps(m, ensure_ascii=False).encode()))
+
+
+def mentions():
+    return " ".join(f'<a href="tg://user?id={i}">{html.escape(n)}</a>' for i, n in load_members().items())
 
 
 def main():
@@ -120,7 +157,9 @@ def main():
     # MAX_HOURS: для GitHub Actions (ліміт джобу 6 год) — бот сам виходить після N годин
     max_hours = float(os.environ.get("MAX_HOURS", "0"))
     deadline = datetime.now(TZ) + timedelta(hours=max_hours)
-    tg("setMyCommands", commands='[{"command":"nextpara","description":"Яка наступна пара"}]')
+    tg("setMyCommands", commands=json.dumps([
+        {"command": "nextpara", "description": "Яка наступна пара"},
+        {"command": "reg", "description": "Тегати мене перед парами"}]))
     # пропускаємо старі команди, що прийшли, поки бот спав
     old = tg("getUpdates", offset=-1).get("result", [])
     offset = old[-1]["update_id"] + 1 if old else None
@@ -138,7 +177,7 @@ def main():
                 if key not in sent and start - LEAD <= now < start:
                     ads = (fetch_ads(r1, r2) if r1 else "") or "посилання немає"
                     send(f"⏰ Через {int((start - now).total_seconds() // 60) + 1} хв пара:\n"
-                         f"<b>{html.escape(info)}</b>\n\n{html.escape(ads)}")
+                         f"<b>{html.escape(info)}</b>\n\n{html.escape(ads)}\n\n{mentions()}")
                     sent.add(key)
             offset = handle_commands(offset, lessons)
         except Exception as e:
@@ -155,6 +194,11 @@ if __name__ == "__main__":
         (st, info, r1, r2), (st2, _, r1b, _) = parse_lessons(sample)
         assert st == datetime(2026, 11, 23, 10, 35, tzinfo=TZ) and r1 == "128053" and "Маркетинг" in info
         assert st2 == datetime(2026, 11, 23, 14, 5, tzinfo=TZ) and r1b is None
+        import tempfile
+        FERNET, MEMBERS_FILE = Fernet(Fernet.generate_key()), os.path.join(tempfile.mkdtemp(), "m.enc")
+        add_member(42, "Паша<3")
+        assert b"42" not in open(MEMBERS_FILE, "rb").read()
+        assert mentions() == '<a href="tg://user?id=42">Паша&lt;3</a>'
         print("selftest ok")
     else:
         main()

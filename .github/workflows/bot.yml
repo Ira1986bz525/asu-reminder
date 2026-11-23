@@ -7,6 +7,9 @@ on:
     - cron: "20 11 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write  # зберегти зашифрований members.enc
+
 concurrency:
   group: bot  # другий запуск чекає, поки перший закінчиться: без дублів повідомлень
   cancel-in-progress: false
@@ -27,5 +30,13 @@ jobs:
           ASU_PASSWORD: ${{ secrets.ASU_PASSWORD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          MEMBERS_KEY: ${{ secrets.MEMBERS_KEY }}
           MAX_HOURS: "5.8"
           PYTHONUNBUFFERED: "1"
+      - name: Save encrypted members
+        if: always()
+        run: |
+          git config user.name asu-bot
+          git config user.email asu-bot@users.noreply.github.com
+          git add members.enc 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "Update members" && git pull --rebase -q && git push)
