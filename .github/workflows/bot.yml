@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write  # зберегти зашифрований members.enc
+  actions: write   # перезапустити самого себе
 
 concurrency:
   group: bot  # другий запуск чекає, поки перший закінчиться: без дублів повідомлень
@@ -40,3 +41,10 @@ jobs:
           git config user.email asu-bot@users.noreply.github.com
           git add members.enc 2>/dev/null || true
           git diff --cached --quiet || (git commit -m "Update members" && git pull --rebase -q && git push)
+      # Крону GitHub не можна вірити: бот сам запускає наступний прогін.
+      # Тільки при успіху, щоб зламаний логін не крутився по колу кожні 15 с (тоді чекаємо крон).
+      - name: Restart self
+        if: success()
+        run: gh workflow run bot.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
